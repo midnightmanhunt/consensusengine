@@ -1,0 +1,163 @@
+// PRO-LEVEL FULL STACK APP
+// Stack: React (frontend) + Node/Express + SQLite + Chart.js
+// Run backend: node server.js
+// Run frontend: npx create-react-app client
+// Then replace src/App.js with below React code
+
+// ================= BACKEND (server.js) =================
+const express = require('express');
+const sqlite3 = require('sqlite3').verbose();
+const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+
+const app = express();
+const SECRET = "supersecret";
+
+app.use(cors());
+app.use(express.json());
+
+const db = new sqlite3.Database('./db.sqlite');
+
+ db.serialize(()=>{
+  db.run("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password TEXT)");
+  db.run("CREATE TABLE IF NOT EXISTS responses (id INTEGER PRIMARY KEY, user_id INTEGER, data TEXT)");
+});
+
+// AUTH
+app.post('/register', async (req,res)=>{
+  const hash = await bcrypt.hash(req.body.password,10);
+  db.run("INSERT INTO users(username,password) VALUES (?,?)",[req.body.username,hash]);
+  res.send({ok:true});
+});
+
+app.post('/login',(req,res)=>{
+  db.get("SELECT * FROM users WHERE username=?",[req.body.username],async(err,user)=>{
+    if(!user) return res.sendStatus(401);
+    const ok = await bcrypt.compare(req.body.password,user.password);
+    if(!ok) return res.sendStatus(401);
+    const token = jwt.sign({id:user.id},SECRET);
+    res.send({token});
+  });
+});
+
+function auth(req,res,next){
+  try{
+    req.user = jwt.verify(req.headers.authorization,SECRET);
+    next();
+  }catch{res.sendStatus(403)}
+}
+
+// SAVE
+app.post('/submit',auth,(req,res)=>{
+  db.run("INSERT INTO responses(user_id,data) VALUES (?,?)",
+  [req.user.id,JSON.stringify(req.body)]);
+  res.send({ok:true});
+});
+
+// STATS
+app.get('/stats',(req,res)=>{
+  db.all("SELECT data FROM responses",[],(err,rows)=>{
+    const stats={};
+    rows.forEach(r=>{
+      const d=JSON.parse(r.data);
+      Object.entries(d).forEach(([q,v])=>{
+        stats[q]=stats[q]||{};
+        stats[q][v]=(stats[q][v]||0)+1;
+      });
+    });
+    res.send(stats);
+  });
+});
+
+// USER PROFILE
+app.get('/me',auth,(req,res)=>{
+  db.get("SELECT data FROM responses WHERE user_id=? ORDER BY id DESC LIMIT 1",
+  [req.user.id],(err,row)=>{
+    res.send(row?JSON.parse(row.data):{});
+  });
+});
+
+app.listen(3000);
+
+
+// ================= FRONTEND (React App.js) =================
+import { useState, useEffect } from 'react';
+import { Bar } from 'react-chartjs-2';
+
+const options = ["Ja","Eerder wel","Neutraal","Eerder niet","Nee"];
+const theories = Array.from({length:100},(_,i)=>"Theory "+(i+1));
+
+export default function App(){
+  const [token,setToken]=useState("");
+  const [answers,setAnswers]=useState({});
+  const [stats,setStats]=useState({});
+
+  async function login(u,p){
+    const res = await fetch('http://localhost:3000/login',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:u,password:p})
+    });
+    const d = await res.json();
+    setToken(d.token);
+    loadStats();
+  }
+
+  async function submit(){
+    await fetch('http://localhost:3000/submit',{
+      method:'POST',headers:{
+        'Content-Type':'application/json',
+        'Authorization':token
+      },body:JSON.stringify(answers)
+    });
+    loadStats();
+  }
+
+  async function loadStats(){
+    const res = await fetch('http://localhost:3000/stats');
+    setStats(await res.json());
+  }
+
+  function analysis(){
+    let score=0,total=0;
+    Object.values(answers).forEach(v=>{
+      if(v==="Ja"||v==="Eerder wel") score++;
+      total++;
+    });
+    return Math.round((score/total)*100);
+  }
+
+  return (
+    <div style={{padding:20}}>
+      <h1>Conspiracy Profiler</h1>
+
+      <h2>Survey</h2>
+      {theories.map((t,i)=>(
+        <div key={i}>
+          <p>{t}</p>
+          {options.map(o=>
+            <label key={o}>
+              <input type="radio" name={i}
+              onChange={()=>setAnswers({...answers,[i]:o})}/>
+              {o}
+            </label>
+          )}
+        </div>
+      ))}
+
+      <button onClick={submit}>Submit</button>
+
+      <h2>📊 Analyse</h2>
+      <p>Je gelooft {analysis()}% van de theorieën</p>
+
+      <h2>📈 Statistieken</h2>
+      {Object.entries(stats).slice(0,5).map(([q,data])=>{
+        const chartData={
+          labels:Object.keys(data),
+          datasets:[{label:'Responses',data:Object.values(data)}]
+        };
+        return <Bar key={q} data={chartData}/>;
+      })}
+    </div>
+  );
+}
